@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Repository Search</title>
-    <!-- PapaParse Library -->
+    <!-- PapaParse Library for CSV -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <!-- SheetJS Library for Excel -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
@@ -31,12 +33,13 @@
         .input-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
         
-        input[type="file"] {
+        input[type="file"], select {
             border: 1px solid #ddd;
             padding: 10px;
             width: 100%;
             border-radius: 4px;
             box-sizing: border-box;
+            background-color: white;
         }
 
         #search-box { 
@@ -55,6 +58,7 @@
             border: 1px solid #ddd; 
             padding: 12px; 
             text-align: left; 
+            white-space: nowrap; /* Prevent messy wrapping for large sheets */
         }
         th { background-color: #007bff; color: white; cursor: pointer; }
         tr:nth-child(even) { background-color: #f8f9fa; }
@@ -83,12 +87,20 @@
     <div class="controls">
         <!-- 1. File Upload (Hidden if data.csv is found automatically) -->
         <div class="input-group" id="upload-section">
-            <label for="csv-file-input">Upload CSV File:</label>
-            <input type="file" id="csv-file-input" accept=".csv">
+            <label for="file-input">Upload File (CSV or Excel):</label>
+            <input type="file" id="file-input" accept=".csv, .xlsx, .xls">
             <small style="color: #666; display: block; margin-top: 5px;">(Or upload "data.csv" to your repository to hide this step)</small>
         </div>
 
-        <!-- 2. Search Box -->
+        <!-- 2. Sheet Selection (Hidden by default, shown for Excel) -->
+        <div class="input-group hidden" id="sheet-section">
+            <label for="sheet-select">Select Sheet:</label>
+            <select id="sheet-select">
+                <!-- Options populated dynamically -->
+            </select>
+        </div>
+
+        <!-- 3. Search Box -->
         <div class="input-group" style="margin-bottom: 0;">
             <label for="search-box">Search Data:</label>
             <input type="text" id="search-box" placeholder="Type to filter...">
@@ -110,7 +122,10 @@
     </footer>
 
     <script>
-        let fullData = [];
+        // Global State
+        let currentWorkbookData = {}; // Format: { "Sheet1": [...], "Sheet2": [...] }
+        let currentActiveData = [];   // The actual flat array being searched
+        let isExcel = false;
 
         // Function to render table
         function renderTable(data, searchTerms = []) {
@@ -118,7 +133,7 @@
             const status = document.getElementById('status-msg');
             container.innerHTML = ''; 
             
-            if (data.length === 0) {
+            if (!data || data.length === 0) {
                 status.innerHTML = "No data found.";
                 return;
             }
@@ -127,6 +142,7 @@
 
             // Helper function to highlight text
             const highlight = (text) => {
+                if (text === null || text === undefined) return '';
                 if (searchTerms.length === 0) return text;
                 
                 const safeTerms = searchTerms
@@ -139,8 +155,25 @@
                 return String(text).replace(regex, '<mark style="background-color: #ffeb3b; padding: 2px; border-radius: 2px;">$1</mark>');
             };
 
-            // Create Headers
-            const headers = Object.keys(data[0]);
+            // DYNAMIC HEADER LOGIC
+            // Instead of just taking keys from row 0, we collect unique keys from the first 50 rows 
+            // (or all if small) to ensure columns don't disappear in "All Sheets" view if schemas differ.
+            const allKeys = new Set();
+            const sampleSize = Math.min(data.length, 100); 
+            
+            // Prioritize "Sheet Name" as the first column if it exists
+            const hasSheetName = data.length > 0 && data[0].hasOwnProperty('_SheetName');
+            
+            for (let i = 0; i < sampleSize; i++) {
+                Object.keys(data[i]).forEach(k => {
+                    if (k !== '_SheetName') allKeys.add(k);
+                });
+            }
+            
+            // Build Headers Array
+            const headers = Array.from(allKeys);
+            if (hasSheetName) headers.unshift('Sheet Name');
+
             let html = `<table><thead><tr>`;
             headers.forEach(header => html += `<th>${header}</th>`);
             html += `</tr></thead><tbody>`;
@@ -149,7 +182,12 @@
             data.forEach(row => {
                 html += `<tr>`;
                 headers.forEach(header => {
-                    const cellData = row[header] || '';
+                    let cellData;
+                    if (header === 'Sheet Name') {
+                         cellData = row['_SheetName'];
+                    } else {
+                         cellData = row[header];
+                    }
                     html += `<td>${highlight(cellData)}</td>`;
                 });
                 html += `</tr>`;
@@ -159,14 +197,88 @@
             container.innerHTML = html;
         }
 
-        // Function to process CSV data
-        function processData(results) {
-            fullData = results.data;
-            renderTable(fullData);
+        // --- EXCEL SHEET HANDLING ---
+
+        function updateSheetView() {
+            const select = document.getElementById('sheet-select');
+            const selection = select.value;
+            
+            if (selection === 'ALL_SHEETS') {
+                // Flatten all sheets into one array
+                currentActiveData = [];
+                Object.keys(currentWorkbookData).forEach(sheetName => {
+                    currentActiveData = currentActiveData.concat(currentWorkbookData[sheetName]);
+                });
+            } else {
+                currentActiveData = currentWorkbookData[selection] || [];
+            }
+            
+            // Trigger search to re-filter/render based on new active data
+            performSearch(); 
         }
 
-        // 1. Auto-load logic: Designed for GitHub Repositories
-        // It tries to read "data.csv" immediately.
+        function setupExcelUI(sheetNames) {
+            isExcel = true;
+            document.getElementById('sheet-section').classList.remove('hidden');
+            const select = document.getElementById('sheet-select');
+            select.innerHTML = ''; // Clear existing
+
+            // Add "All Workbook" Option
+            const allOpt = document.createElement('option');
+            allOpt.value = 'ALL_SHEETS';
+            allOpt.text = 'All Workbook (Search All Sheets)';
+            select.appendChild(allOpt);
+
+            // Add Individual Sheets
+            sheetNames.forEach(name => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.text = name;
+                select.appendChild(opt);
+            });
+
+            // Listen for changes
+            select.removeEventListener('change', updateSheetView); // Prevent duplicate listeners
+            select.addEventListener('change', updateSheetView);
+
+            // Initial view
+            updateSheetView();
+        }
+
+        // --- MAIN LOAD FUNCTIONS ---
+
+        function loadCSV(data) {
+            isExcel = false;
+            document.getElementById('sheet-section').classList.add('hidden');
+            currentActiveData = data;
+            renderTable(currentActiveData);
+            document.getElementById('status-msg').innerHTML = "✅ CSV loaded successfully.";
+        }
+
+        function loadExcel(workbook) {
+            currentWorkbookData = {};
+            const sheetNames = workbook.SheetNames;
+            
+            // Parse ALL sheets
+            sheetNames.forEach(sheetName => {
+                const worksheet = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+                
+                // Add Sheet Name tag to every row for identification in "All" view
+                const labeledData = jsonData.map(row => ({
+                    "_SheetName": sheetName,
+                    ...row
+                }));
+
+                currentWorkbookData[sheetName] = labeledData;
+            });
+
+            setupExcelUI(sheetNames);
+            document.getElementById('status-msg').innerHTML = "✅ Excel Workbook loaded successfully.";
+        }
+
+
+        // 1. Auto-load logic (data.csv)
         try {
             Papa.parse("data.csv", {
                 download: true,
@@ -174,40 +286,54 @@
                 skipEmptyLines: true,
                 complete: function(results) {
                     if (results.data && results.data.length > 0) {
-                        console.log("Auto-loaded data.csv from repository");
-                        
-                        // HIDE the manual upload button since we found the file
+                        console.log("Auto-loaded data.csv");
                         document.getElementById('upload-section').style.display = 'none';
-                        document.getElementById('status-msg').innerHTML = "✅ Database loaded successfully.";
-                        
-                        processData(results);
+                        loadCSV(results.data);
                     }
                 },
-                error: function(err) {
-                    console.log("Auto-load failed (likely local mode or missing file).");
-                    document.getElementById('status-msg').innerHTML = "Please upload a CSV file to begin.";
+                error: function() {
+                    document.getElementById('status-msg').innerHTML = "Please upload a CSV or Excel file to begin.";
                 }
             });
         } catch (e) {
-            console.log("Auto-load error:", e);
-            document.getElementById('status-msg').innerHTML = "Please upload a CSV file to begin.";
+            document.getElementById('status-msg').innerHTML = "Please upload a CSV or Excel file to begin.";
         }
 
-        // 2. Manual Upload Logic (Fallback)
-        document.getElementById('csv-file-input').addEventListener('change', function(e) {
+        // 2. Manual Upload Logic
+        document.getElementById('file-input').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
 
             document.getElementById('status-msg').innerHTML = "Parsing file...";
-            
-            Papa.parse(file, {
-                header: true,
-                skipEmptyLines: true,
-                complete: processData,
-                error: function(err) {
-                    document.getElementById('status-msg').innerHTML = `<span class="error">Error: ${err.message}</span>`;
-                }
-            });
+            const fileName = file.name.toLowerCase();
+
+            if (fileName.endsWith('.csv')) {
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        loadCSV(results.data);
+                    },
+                    error: function(err) {
+                        document.getElementById('status-msg').innerHTML = `<span class="error">CSV Error: ${err.message}</span>`;
+                    }
+                });
+            } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, {type: 'array'});
+                        loadExcel(workbook);
+                    } catch (err) {
+                        console.error(err);
+                        document.getElementById('status-msg').innerHTML = `<span class="error">Excel Error: ${err.message}</span>`;
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                document.getElementById('status-msg').innerHTML = `<span class="error">Unsupported format. Use CSV or Excel.</span>`;
+            }
         });
 
         // 3. Search Logic
@@ -215,20 +341,22 @@
             const rawInput = document.getElementById('search-box').value;
             const isMultiSearch = document.getElementById('multi-search-toggle').checked;
             
-            if (fullData.length === 0) return;
+            // Use currentActiveData (which is either one sheet or all sheets)
+            if (!currentActiveData || currentActiveData.length === 0) {
+                renderTable([]); 
+                return;
+            }
 
             let searchTerms = [];
 
             if (isMultiSearch) {
-                // Multi-keyword mode: Split by spaces (AND logic)
                 searchTerms = rawInput.toLowerCase().split(/\s+/).filter(t => t.length > 0);
             } else {
-                // Exact Phrase mode
                 const trimmed = rawInput.toLowerCase().trim();
                 if (trimmed) searchTerms = [trimmed];
             }
 
-            const filteredData = fullData.filter(row => {
+            const filteredData = currentActiveData.filter(row => {
                 if (searchTerms.length === 0) return true;
                 
                 return searchTerms.every(term => 
