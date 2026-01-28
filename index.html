@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Repository Search</title>
+    <!-- PapaParse Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            padding: 20px; 
+            max-width: 1000px; 
+            margin: 0 auto; 
+            background-color: #f9f9f9;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        h2 { color: #333; }
+        
+        /* Control Panel */
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .input-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        
+        input[type="file"] {
+            border: 1px solid #ddd;
+            padding: 10px;
+            width: 100%;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        #search-box { 
+            width: 100%; 
+            padding: 12px; 
+            font-size: 16px; 
+            border: 1px solid #ddd; 
+            border-radius: 4px; 
+            box-sizing: border-box;
+        }
+
+        /* Table Styling */
+        .table-wrapper { overflow-x: auto; flex-grow: 1; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { 
+            border: 1px solid #ddd; 
+            padding: 12px; 
+            text-align: left; 
+        }
+        th { background-color: #007bff; color: white; cursor: pointer; }
+        tr:nth-child(even) { background-color: #f8f9fa; }
+        tr:hover { background-color: #e9ecef; }
+        
+        .status { margin-bottom: 10px; font-style: italic; color: #666; }
+        .error { color: #721c24; background-color: #f8d7da; padding: 10px; border-radius: 4px; border: 1px solid #f5c6cb; }
+        
+        /* Toggle visibility helper */
+        .hidden { display: none; }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding: 20px;
+            color: #888;
+            font-size: 14px;
+            border-top: 1px solid #e1e1e1;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>📂 Data Search</h2>
+    
+    <div class="controls">
+        <!-- 1. File Upload (Hidden if data.csv is found automatically) -->
+        <div class="input-group" id="upload-section">
+            <label for="csv-file-input">Upload CSV File:</label>
+            <input type="file" id="csv-file-input" accept=".csv">
+            <small style="color: #666; display: block; margin-top: 5px;">(Or upload "data.csv" to your repository to hide this step)</small>
+        </div>
+
+        <!-- 2. Search Box -->
+        <div class="input-group" style="margin-bottom: 0;">
+            <label for="search-box">Search Data:</label>
+            <input type="text" id="search-box" placeholder="Type to filter...">
+            <div style="margin-top: 8px;">
+                <input type="checkbox" id="multi-search-toggle" checked>
+                <label for="multi-search-toggle" style="display:inline; font-weight:normal; cursor:pointer; color: #555;">
+                    Enable Multi-keyword Search (Search within results)
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <div id="status-msg" class="status">Initializing...</div>
+
+    <div id="table-container" class="table-wrapper"></div>
+
+    <footer>
+        Created by Gopal_Raj
+    </footer>
+
+    <script>
+        let fullData = [];
+
+        // Function to render table
+        function renderTable(data, searchTerms = []) {
+            const container = document.getElementById('table-container');
+            const status = document.getElementById('status-msg');
+            container.innerHTML = ''; 
+            
+            if (data.length === 0) {
+                status.innerHTML = "No data found.";
+                return;
+            }
+
+            status.innerHTML = `Showing ${data.length} row(s)`;
+
+            // Helper function to highlight text
+            const highlight = (text) => {
+                if (searchTerms.length === 0) return text;
+                
+                const safeTerms = searchTerms
+                    .map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                    .join('|');
+                
+                if (!safeTerms) return text;
+
+                const regex = new RegExp(`(${safeTerms})`, 'gi');
+                return String(text).replace(regex, '<mark style="background-color: #ffeb3b; padding: 2px; border-radius: 2px;">$1</mark>');
+            };
+
+            // Create Headers
+            const headers = Object.keys(data[0]);
+            let html = `<table><thead><tr>`;
+            headers.forEach(header => html += `<th>${header}</th>`);
+            html += `</tr></thead><tbody>`;
+
+            // Create Rows
+            data.forEach(row => {
+                html += `<tr>`;
+                headers.forEach(header => {
+                    const cellData = row[header] || '';
+                    html += `<td>${highlight(cellData)}</td>`;
+                });
+                html += `</tr>`;
+            });
+
+            html += `</tbody></table>`;
+            container.innerHTML = html;
+        }
+
+        // Function to process CSV data
+        function processData(results) {
+            fullData = results.data;
+            renderTable(fullData);
+        }
+
+        // 1. Auto-load logic: Designed for GitHub Repositories
+        // It tries to read "data.csv" immediately.
+        try {
+            Papa.parse("data.csv", {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    if (results.data && results.data.length > 0) {
+                        console.log("Auto-loaded data.csv from repository");
+                        
+                        // HIDE the manual upload button since we found the file
+                        document.getElementById('upload-section').style.display = 'none';
+                        document.getElementById('status-msg').innerHTML = "✅ Database loaded successfully.";
+                        
+                        processData(results);
+                    }
+                },
+                error: function(err) {
+                    console.log("Auto-load failed (likely local mode or missing file).");
+                    document.getElementById('status-msg').innerHTML = "Please upload a CSV file to begin.";
+                }
+            });
+        } catch (e) {
+            console.log("Auto-load error:", e);
+            document.getElementById('status-msg').innerHTML = "Please upload a CSV file to begin.";
+        }
+
+        // 2. Manual Upload Logic (Fallback)
+        document.getElementById('csv-file-input').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            document.getElementById('status-msg').innerHTML = "Parsing file...";
+            
+            Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                complete: processData,
+                error: function(err) {
+                    document.getElementById('status-msg').innerHTML = `<span class="error">Error: ${err.message}</span>`;
+                }
+            });
+        });
+
+        // 3. Search Logic
+        function performSearch() {
+            const rawInput = document.getElementById('search-box').value;
+            const isMultiSearch = document.getElementById('multi-search-toggle').checked;
+            
+            if (fullData.length === 0) return;
+
+            let searchTerms = [];
+
+            if (isMultiSearch) {
+                // Multi-keyword mode: Split by spaces (AND logic)
+                searchTerms = rawInput.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+            } else {
+                // Exact Phrase mode
+                const trimmed = rawInput.toLowerCase().trim();
+                if (trimmed) searchTerms = [trimmed];
+            }
+
+            const filteredData = fullData.filter(row => {
+                if (searchTerms.length === 0) return true;
+                
+                return searchTerms.every(term => 
+                    Object.values(row).some(val => 
+                        String(val).toLowerCase().includes(term)
+                    )
+                );
+            });
+
+            renderTable(filteredData, searchTerms);
+        }
+
+        document.getElementById('search-box').addEventListener('keyup', performSearch);
+        document.getElementById('multi-search-toggle').addEventListener('change', performSearch);
+    </script>
+
+</body>
+</html>
